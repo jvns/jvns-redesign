@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<!--[if IEMobile 7 ]><html class="no-js iem7"><![endif]-->
+<!--[if lt IE 9]><html class="no-js lte-ie8"><![endif]-->
+<!--[if (gt IE 8)|(gt IEMobile 7)|!(IEMobile)|!(IE)]><!--><html class="no-js" lang="en"><!--<![endif]-->
+<head>
+	<meta charset="utf-8">
+	<title>Diving into HDFS - Julia Evans</title>
+	<meta name="author" content="Julia Evans">
+	<meta name="description" content="Yesterday I wanted to start learning about how HDFS (the Hadoop
+	Distributed File System) works internally. I knew that It&#8217;s distributed, so one &hellip;">
+
+	<meta name="HandheldFriendly" content="True">
+	<meta name="MobileOptimized" content="320">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+
+	<link href="/atom.xml" rel="alternate" title="Julia Evans" type="application/atom+xml">
+	<link href="http://fonts.googleapis.com/css?family=PT+Serif:regular,italic,bold,bolditalic" rel="stylesheet" type="text/css">
+	<link href="http://fonts.googleapis.com/css?family=PT+Sans:regular,italic,bold,bolditalic" rel="stylesheet" type="text/css">
+
+</head>
+<body>
+	<header role="banner">
+		<hgroup>
+			<h1><a href="/">Julia Evans</a></h1>
+			<h2><a href="http://hackerschool.com">Hacker School</a> alumna</h2>
+		</hgroup>
+		<div id="uliaea">
+			If you like this, you may like <a href="http://www.uliaea.ca">Ulia Ea</a>.
+		</div>
+	</header>
+	<nav role="navigation">
+		<ul class="subscription" data-subscription="rss">
+			<li><a href="/atom.xml" rel="subscribe-rss" title="subscribe via RSS">RSS</a></li>
+		</ul>
+		<form action="http://google.com/search" method="get">
+			<fieldset role="search">
+				<input type="hidden" name="q" value="site:jvns.ca"/>
+				<input class="search" type="text" name="q" results="0" placeholder="Search"/>
+			</fieldset>
+		</form>
+		<ul class="main-navigation">
+			<li><a href="/">Blog</a></li>
+			<li><a href="/about">About</a></li>
+			<li><a href="/blog/archives">Archives</a></li>
+			<li><a href="/talks">Talks</a></li>
+			<li><a href="/projects/">Projects</a></li>
+		</ul>
+	</nav>
+<div id="main">
+	<div id="content">
+		<div>
+			<article class="hentry" role="article">
+				<header>
+					<h1 class="entry-title">Diving into HDFS</h1>
+					<p class="meta">
+						<time datetime="2014-05-15T12:40:39-04:00" pubdate data-updated="true">May 15<span>th</span>, 2014</time>
+					</p>
+				</header>
+				<div class="entry-content">
+					<p>Yesterday I wanted to start learning about how HDFS (the Hadoop
+					Distributed File System) works internally. I knew that</p>
+					<ul>
+					<li>It&#8217;s distributed, so one file may be stored across many different
+					machines</li>
+					<li>There&#8217;s a <em>namenode</em>, which keeps track of where all the files are
+					stored</li>
+					<li>There are <em>data nodes</em>, which contain the actual file data</li>
+					</ul>
+					<p>But I wasn&#8217;t quite sure how to get started! I knew how to navigate the
+					filesystem from the command line (<code>hadoop fs -ls /</code>, and friends), but
+					not how to figure out how it works internally.</p>
+					<p><a href="http://twitter.com/colinmarc">Colin Marc</a> pointed me to this great
+					library called <a href="https://github.com/spotify/snakebite">snakebite</a> which
+					is a Python HDFS client. In particular he pointed me to the part of
+					the code that
+					<a href="https://github.com/spotify/snakebite/blob/master/snakebite/client.py#L966-L1033">reads file contents from HDFS</a>.
+					We&#8217;re going to tear it apart a bit and see what exactly it does!</p>
+					<h3>Getting started: Elastic MapReduce!</h3>
+					<p>I didn&#8217;t want to set up a Hadoop cluster by hand, and I had some AWS
+					credit that I&#8217;d gotten for free, so I set up a small Amazon Elastic
+					MapReduce cluster. I worked on this with with
+					<a href="https://twitter.com/ptn777">Pablo Torres</a> and
+					<a href="https://twitter.com/SashaLaundy">Sasha Laundy</a> and we spent much of
+					the morning fighting with it and trying to figure out protocol
+					versions and why it wasn&#8217;t working with Snakebite.</p>
+					<p>What ended up working was choosing AMI version &#8220;3.0.4 (hadoop 2.2.0)&#8221;.
+					This is CDH5 and Hadoop protocol version 9. Hadooop versions are
+					<em>confusing</em>. We installed that and Snakebite version 2.4.1 and that
+					almost worked.</p>
+					<p><strong>Important things</strong>:</p>
+					<ul>
+					<li>We needed to look at <code>/home/hadoop/conf/core-site.xml</code> to find the
+					namenode IP and port (in <code>fs.default.name</code></li>
+					<li>We needed to edit
+					<a href="https://github.com/spotify/snakebite/blob/25418007e93f99f6dc6807ca44d25287217e783f/snakebite/config.py">snakebite/config.py</a>
+					to say &#8216;fs.default.name&#8217; instead of &#8216;fs.defaultFS&#8217;. Who knows. It
+					worked.</li>
+					</ul>
+					<p>Once we did this, we could run <code>snakebite ls /</code> successfully! Time to
+					move on to breaking things!</p>
+					<h3>Putting data into our cluster</h3>
+					<p>I copied some Wikipedia data from one of Amazon&#8217;s public datasets like
+					this;</p>
+					<p><code>hadoop distcp
+					s3://datasets.elasticmapreduce/wikipediaxml/part-116.xml /wikipedia</code></p>
+					<p>This creates a file in HDFS called <code>/wikipedia</code>. You can see more
+					datasets that are easy to copy into HDFS from Amazon at
+					<a href="https://s3.amazonaws.com/datasets.elasticmapreduce/">https://s3.amazonaws.com/datasets.elasticmapreduce/</a>.</p>
+					<h3>Getting a block from our file!</h3>
+					<p>Now that we have a Hadoop cluster, some data in HDFS, and a tool to
+					look at it with (snakebite), we can really get started!</p>
+					<p>Files in HDFS are split into <em>blocks</em>. When getting a file from HDFS,
+					the first thing we need to do is to ask the namenode where the blocks
+					are stored.</p>
+					<p>With the help of a lot of snakebite source diving, I write a small
+					Python function to do this called <code>find_blocks</code>. You can see it in a
+					tiny Python module I made called
+					<a href="https://github.com/jvns/hadoop_fun/blob/master/hdfs_fun.py">hdfs_fun.py</a>.
+					To get it to work, you&#8217;ll need a Hadoop cluster and snakebite.</p>
+					<pre>
+					>>> cl = hdfs_fun.create_client()
+					>>> hdfs_fun.find_blocks(cl, '/wikipedia')
+					[snakebite.protobuf.hdfs_pb2.LocatedBlockProto at 0xe33a910,
+					snakebite.protobuf.hdfs_pb2.LocatedBlockProto at 0xe33ab40
+					</pre>
+					<p>One of the first things I did was use <code>strace</code> to find out what data actually gets sent over the wire when I call this function. Here&#8217;s a snippet: (<a href="https://gist.github.com/jvns/bc054ea0f38b5054fd3a">the whole thing</a>)</p>
+					<p>Part of the request: asking for the block locations for the
+					<code>/wikipedia</code> file.</p>
+					<pre>
+					sendto(7,
+					"\n\21getBlockLocations\22.org.apache.hadoop.hdfs.protocol.ClientProtocol\30\1",
+					69, 0, NULL, 0) = 69
+					sendto(7, "\n\n/wikipedia\20\0\30\337\260\240]", 19, 0, NULL, 0) = 19
+					</pre>
+					<p>Part of the response: (I&#8217;ve removed most of it to point out some of
+					the important parts)</p>
+					<pre>
+					recvfrom(7,
+					"....BP-1019336183-10.165.43.39-1400088409498..........................
+					10.147.177.170-9200-1400088495802........................
+					BP-1019336183-10.165.43.39-1400088409498.............10.147.177.170-9200-1400088495802
+					\360G(\216G0\361G8\0\20\200\240\201\213\275\f\30\200\340\376]
+					\200\300\202\255\274\f(\200\340\376]0\212\306\273\205\340(8\1B\r/default-rackP\0
+					\0*\10\n\0\22\0\32\0\"\0\30\0\"\355", 731, 0, NULL, NULL) = 731
+					</pre>
+					<p>Back in our Python console, we can see what some of these numbers mean:</p>
+					<pre>
+					>>> blocks[0].b.poolId
+					u'BP-1019336183-10.165.43.39-1400088409498'
+					>>> blocks[0].b.numBytes
+					134217728L
+					>>> blocks[0].locs[0].id.ipAddr
+					u'10.147.177.170'
+					>>> blocks[0].locs[0].id.xferPort
+					9200
+					>>> blocks[1].b.poolId
+					u'BP-1019336183-10.165.43.39-1400088409498'
+					>>> blocks[1].b.numBytes
+					61347935L
+					</pre>
+					<p>So we have two blocks! The two <code>numBytes</code> add up to the total size of
+					the file! Cool! They both have the same <code>poolId</code>, and it also turns
+					out that they have the same IP address and port</p>
+					<h3>Reading a block</h3>
+					<p>Let&#8217;s try to read the data from a block! (you can see the <code>read_block</code>
+					function here in
+					<a href="https://github.com/jvns/hadoop_fun/blob/master/hdfs_fun.py">hdfs_fun.py</a></p>
+					<pre>
+					>>> block = blocks[0]
+					>>> gen = hdfs_fun.read_block(block) # returns a generator
+					>>> load = gen.next()
+					</pre>
+					<p>If I look at <code>strace</code>, it starts with:</p>
+					<pre>
+					connect(8, {sa_family=AF_INET, sin_port=htons(9200),
+					sin_addr=inet_addr("10.147.177.170")}, 16) = 0
+					sendto(8,
+					"\nB\n5\n3\n(BP-1019336183-10.165.43.39-1400088409498\20\211\200\200\200\4\30\361\7\22\tsnakebite\20\0\30\200\200\200@",
+					75, 0, NULL, 0) = 75
+					</pre>
+					<p><em>Awesome</em>. We can see easily that it&#8217;s connecting to the block&#8217;s data
+					node (<code>10.147.177.170</code> on port <code>9200</code>, and asking for something with
+					id <code>BP-1019336183-10.165.43.39-1400088409498</code>). Then the data node
+					starts sending back data!!!</p>
+					<pre>
+					recvfrom(8, "ot, it's a painting. Thomas Graeme apparently lived in
+					the mid-18th century, according to the [[Graeme Park]] article. The
+					rationale also says that this image is &quot;used on the biography
+					page about him by USHistory.org of Graeme Park.&quot; I cannot quite
+					figure out what this means, but I am guessing that it means the
+					uploader took this image from a page hosted on USHistory.org. A
+					painting of a man who lived in the mid-18th century is likely to be
+					the public domain, as claimed, but we have no good source", 512, 0,
+					NULL, NULL) = 512
+					</pre>
+					<p>AMAZING. We have conquered HDFS.</p>
+					<p>That&#8217;s all for this blog post! We&#8217;ll see if I do more later today.</p>
+				</div>
+				<footer>
+					<p class="meta">
+						<span class="byline author vcard">Posted by <span class="fn">Julia Evans</span></span>
+						<time datetime="2014-05-15T12:40:39-04:00" pubdate data-updated="true">May 15<span>th</span>, 2014</time>
+					</p>
+					<div class="sharing">
+						<a href="http://twitter.com/share" class="twitter-share-button" data-url="http://jvns.ca/blog/2014/05/15/diving-into-hdfs/" data-via="b0rk" data-counturl="http://jvns.ca/blog/2014/05/15/diving-into-hdfs/">Tweet</a>
+					</div>
+					<p class="meta">
+						<a class="basic-alignment left" href="/blog/2014/05/13/profiling-with-perf/" title="Previous Post: I can spy on my CPU cycles with perf!">&laquo; I can spy on my CPU cycles with perf!</a>
+						<a class="basic-alignment right" href="/blog/2014/05/28/anonymous-talk-submission-equals-amazing/" title="Next Post: Anonymous talk review is amazing.">Anonymous talk review is amazing. &raquo;</a>
+					</p>
+				</footer>
+			</article>
+			<section>
+				<h1>Comments</h1>
+				<div id="disqus_thread" aria-live="polite"><noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+				</div>
+			</section>
+		</div>
+			<aside class="sidebar">
+				<section>
+					<h1>Recent Posts</h1>
+					<ul id="recent_posts">
+						<li class="post">
+							<a href="/blog/2014/06/13/asking-questions-is-a-superpower/">Asking questions is a superpower</a>
+						</li>
+						<li class="post">
+							<a href="/blog/2014/06/06/working-remote/">Working remote, 3 months in</a>
+						</li>
+						<li class="post">
+							<a href="/blog/2014/06/06/should-my-conference-do-anonymous-review/">Should my conference do anonymous review?</a>
+						</li>
+						<li class="post">
+							<a href="/blog/2014/05/28/anonymous-talk-submission-equals-amazing/">Anonymous talk review is amazing.</a>
+						</li>
+						<li class="post">
+							<a href="/blog/2014/05/15/diving-into-hdfs/">Diving into HDFS</a>
+						</li>
+					</ul>
+				</section>
+				<section>
+					<h1>GitHub Repos</h1>
+					<ul id="gh_repos">
+						<li class="loading">Status updating...</li>
+					</ul>
+					<a href="https://github.com/jvns">@jvns</a> on GitHub
+					<script type="text/rocketscript">
+					$.domReady(function(){
+						if (!window.jXHR){
+							var jxhr = document.createElement('script');
+							jxhr.type = 'text/javascript';
+							jxhr.src = '/javascripts/libs/jXHR.js';
+							var s = document.getElementsByTagName('script')[0];
+							s.parentNode.insertBefore(jxhr, s);
+						}
+
+						github.showRepos({
+							user: 'jvns',
+							count: 0,
+							skip_forks: true,
+							target: '#gh_repos'
+						});
+					});
+					</script>
+					<script data-rocketsrc="/javascripts/github.js" type="text/rocketscript"> </script>
+				</section>
+				<section>
+					<h1>Latest Tweets</h1>
+					<ul id="tweets">
+						<a class="twitter-timeline" data-dnt="true" href="https://twitter.com/b0rk" data-widget-id="380344726030778368">Tweets by @b0rk</a>
+						<script type="text/rocketscript">!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0],p=/^http:/.test(d.location)?'http':'https';if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src=p+"://platform.twitter.com/widgets.js";fjs.parentNode.insertBefore(js,fjs);}}(document,"script","twitter-wjs");</script>
+					</ul>
+					<a href="http://twitter.com/b0rk" class="twitter-follow-button" data-show-count="false">Follow @b0rk</a>
+				</section>
+			</aside>
+			</div>
+		</div>
+
+		<footer role="contentinfo">
+			<p>
+				Copyright &copy; 2014 - Julia Evans -
+				<span class="credit">Powered by <a href="http://octopress.org">Octopress</a></span>
+			</p>
+		</footer>
+
+		<script type="text/rocketscript">
+		var disqus_shortname = 'jvns';
+		// var disqus_developer = 1;
+		var disqus_identifier = 'http://jvns.ca/blog/2014/05/15/diving-into-hdfs/';
+		var disqus_url = 'http://jvns.ca/blog/2014/05/15/diving-into-hdfs/';
+		var disqus_script = 'embed.js';
+
+		(function () {
+			var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+			dsq.src = 'http://' + disqus_shortname + '.disqus.com/' + disqus_script;
+			(document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+		}());
+		</script>
+		<script type="text/rocketscript">
+		(function(){
+			var twitterWidgets = document.createElement('script');
+			twitterWidgets.type = 'text/javascript';
+			twitterWidgets.async = true;
+			twitterWidgets.src = 'http://platform.twitter.com/widgets.js';
+			document.getElementsByTagName('head')[0].appendChild(twitterWidgets);
+		})();
+		</script>
+	</body>
+</html>
